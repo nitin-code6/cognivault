@@ -5,9 +5,11 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from google import genai
 from PyPDF2 import PdfReader
+from database import SessionLocal, DocumentChunk, init_db
 import uvicorn
 
 load_dotenv()
+init_db()
 
 app = FastAPI()
 
@@ -64,13 +66,32 @@ async def upload_document(file: UploadFile = File(...)):
                 chunks.append(chunk)
             i += (chunk_size - overlap)
             
+        # Generate Embeddings & Save to DB
+        db = SessionLocal()
+        try:
+            for text_chunk in chunks:
+                emb_res = client.models.embed_content(
+                    model='text-embedding-004',
+                    contents=text_chunk
+                )
+                
+                db_chunk = DocumentChunk(
+                    filename=file.filename,
+                    text=text_chunk,
+                    embedding=emb_res.embeddings[0].values
+                )
+                db.add(db_chunk)
+            db.commit()
+        finally:
+            db.close()
+            
         return {
             "filename": file.filename,
             "metadata": {
                 "pages": len(pdf.pages),
                 "total_chunks": len(chunks)
             },
-            "chunks": chunks
+            "status": "embedded_and_stored"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
