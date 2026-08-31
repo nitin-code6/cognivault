@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 from google import genai
 from PyPDF2 import PdfReader
+from sqlalchemy import select
 from database import SessionLocal, DocumentChunk, init_db
 import uvicorn
 
@@ -19,6 +20,7 @@ client = genai.Client(api_key=os.getenv("LLM_API_KEY"))
 
 class ChatRequest(BaseModel):
     message: str
+    filter_filename: str = None
 
 class ChatResponse(BaseModel):
     reply: str
@@ -29,15 +31,39 @@ def health_check():
 
 @app.post("/api/chat", response_model=ChatResponse)
 def chat_endpoint(request: ChatRequest):
+    db = SessionLocal()
     try:
-        # Call the LLM (Gemini 2.5 Flash) with the user's prompt
+        # 1. Embed user query
+        query_emb = client.models.embed_content(
+            model='text-embedding-004',
+            contents=request.message
+        ).embeddings[0].values
+        
+        # 2. Retrieve top chunks
+        stmt = select(DocumentChunk)
+        if request.filter_filename:
+            stmt = stmt.filter(DocumentChunk.filename == request.filter_filename)
+            
+        results = db.scalars(
+            stmt.order_by(DocumentChunk.embedding.cosine_distance(query_emb))
+            .limit(3)
+        ).all()
+        
+        context_text = "\n\n".join([f"Source: {res.filename}\n{res.text}" for res in results])
+        
+        # 3. Augment Prompt
+        augmented_prompt = f"Use the following context to answer the user's question. If you don't know the answer based on the context, say so.\n\nContext:\n{context_text}\n\nQuestion:\n{request.message}"
+        
+        # Call the LLM (Gemini 2.5 Flash) with the augmented prompt
         response = client.models.generate_content(
             model='gemini-2.5-flash',
-            contents=request.message,
+            contents=augmented_prompt,
         )
         return ChatResponse(reply=response.text)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        db.close()
 
 @app.post("/api/documents/upload")
 async def upload_document(file: UploadFile = File(...)):
