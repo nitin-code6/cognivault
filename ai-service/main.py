@@ -1,8 +1,10 @@
 import os
-from fastapi import FastAPI, HTTPException
+import io
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from google import genai
+from PyPDF2 import PdfReader
 import uvicorn
 
 load_dotenv()
@@ -32,6 +34,44 @@ def chat_endpoint(request: ChatRequest):
             contents=request.message,
         )
         return ChatResponse(reply=response.text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/documents/upload")
+async def upload_document(file: UploadFile = File(...)):
+    try:
+        content = await file.read()
+        
+        # We only support PDF for now
+        if not file.filename.lower().endswith('.pdf'):
+            raise HTTPException(status_code=400, detail="Only PDF files are supported")
+            
+        pdf = PdfReader(io.BytesIO(content))
+        
+        extracted_text = ""
+        for page in pdf.pages:
+            extracted_text += page.extract_text() + "\n"
+            
+        # Fixed-size Semantic Chunking
+        chunk_size = 500
+        overlap = 50
+        chunks = []
+        
+        i = 0
+        while i < len(extracted_text):
+            chunk = extracted_text[i:i+chunk_size]
+            if chunk.strip():
+                chunks.append(chunk)
+            i += (chunk_size - overlap)
+            
+        return {
+            "filename": file.filename,
+            "metadata": {
+                "pages": len(pdf.pages),
+                "total_chunks": len(chunks)
+            },
+            "chunks": chunks
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
