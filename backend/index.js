@@ -2,12 +2,14 @@ const express = require('express');
 const cors = require('cors');
 const multer = require('multer');
 const fs = require('fs');
+const morgan = require('morgan');
 
 const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
+app.use(morgan('dev'));
 
 // AI Service configuration
 const AI_SERVICE_URL = process.env.AI_SERVICE_URL || 'http://127.0.0.1:8000';
@@ -18,13 +20,25 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+// Basic Prompt Injection Filter
+const FORBIDDEN_WORDS = ["ignore all previous instructions", "jailbreak", "override"];
+
 // React -> Node -> Python -> Node -> React
 app.post('/api/chat', async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message, filter_filename, history } = req.body;
     
     if (!message) {
       return res.status(400).json({ error: 'Message is required' });
+    }
+    
+    // Guardrail Check
+    const lowerMessage = message.toLowerCase();
+    for (const word of FORBIDDEN_WORDS) {
+      if (lowerMessage.includes(word)) {
+        console.warn(`[SECURITY] Blocked prompt injection attempt`);
+        return res.status(403).json({ error: "Security Guardrail Triggered" });
+      }
     }
 
     // Call the Python AI Service (Node -> Python)
@@ -33,7 +47,7 @@ app.post('/api/chat', async (req, res) => {
       headers: {
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ message })
+      body: JSON.stringify({ message, filter_filename, history: history || [] })
     });
 
     if (!aiResponse.ok) {
